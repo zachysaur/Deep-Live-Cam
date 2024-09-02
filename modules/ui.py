@@ -10,7 +10,13 @@ import modules.metadata
 from modules.face_analyser import get_one_face
 from modules.capturer import get_video_frame, get_video_frame_total
 from modules.processors.frame.core import get_frame_processors_modules
-from modules.utilities import is_image, is_video, resolve_relative_path, has_image_extension
+from modules.utilities import is_image, is_video, resolve_relative_path
+
+import subprocess
+import re
+
+import customtkinter as ctk
+from typing import List
 
 ROOT = None
 ROOT_HEIGHT = 700
@@ -18,9 +24,7 @@ ROOT_WIDTH = 600
 
 PREVIEW = None
 PREVIEW_MAX_HEIGHT = 700
-PREVIEW_MAX_WIDTH  = 1200
-PREVIEW_DEFAULT_WIDTH  = 960
-PREVIEW_DEFAULT_HEIGHT = 540
+PREVIEW_MAX_WIDTH = 1200
 
 RECENT_DIRECTORY_SOURCE = None
 RECENT_DIRECTORY_TARGET = None
@@ -34,18 +38,29 @@ status_label = None
 
 img_ft, vid_ft = modules.globals.file_types
 
+# Camera 목록을 전역 변수로 선언
+camera_devices: List[str] = []
+selected_camera: ctk.StringVar = None
+camera_dropdown: ctk.CTkOptionMenu = None
 
 def init(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.CTk:
-    global ROOT, PREVIEW
+    global ROOT, PREVIEW, camera_devices, selected_camera
 
+    # 카메라 장치 목록 가져오기
+    camera_devices = get_camera_names()
     ROOT = create_root(start, destroy)
     PREVIEW = create_preview(ROOT)
 
+    selected_camera = ctk.StringVar(value=camera_devices[0] if camera_devices else "No camera")
+
+    # 카메라 선택 드롭다운 추가
+    create_camera_dropdown(ROOT)
+    
     return ROOT
 
 
 def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.CTk:
-    global source_label, target_label, status_label
+    global source_label, target_label, status_label, camera_dropdown
 
     ctk.deactivate_automatic_dpi_awareness()
     ctk.set_appearance_mode('system')
@@ -65,9 +80,6 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
 
     select_face_button = ctk.CTkButton(root, text='Select a face', cursor='hand2', command=lambda: select_source_path())
     select_face_button.place(relx=0.1, rely=0.4, relwidth=0.3, relheight=0.1)
-
-    swap_faces_button = ctk.CTkButton(root, text='↔', cursor='hand2', command=lambda: swap_faces_paths())
-    swap_faces_button.place(relx=0.45, rely=0.4, relwidth=0.1, relheight=0.1)
 
     select_target_button = ctk.CTkButton(root, text='Select a target', cursor='hand2', command=lambda: select_target_path())
     select_target_button.place(relx=0.6, rely=0.4, relwidth=0.3, relheight=0.1)
@@ -93,13 +105,8 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
     many_faces_switch = ctk.CTkSwitch(root, text='Many faces', variable=many_faces_value, cursor='hand2', command=lambda: setattr(modules.globals, 'many_faces', many_faces_value.get()))
     many_faces_switch.place(relx=0.6, rely=0.65)
 
-    # Add color correction toggle button
-    color_correction_value = ctk.BooleanVar(value=modules.globals.color_correction)
-    color_correction_switch = ctk.CTkSwitch(root, text='Fix Blueish Cam\n(force cv2 to use RGB instead of BGR)', variable=color_correction_value, cursor='hand2', command=lambda: setattr(modules.globals, 'color_correction', color_correction_value.get()))
-    color_correction_switch.place(relx=0.6, rely=0.70)
-
-#    nsfw_value = ctk.BooleanVar(value=modules.globals.nsfw_filter)
-#    nsfw_switch = ctk.CTkSwitch(root, text='NSFW filter', variable=nsfw_value, cursor='hand2', command=lambda: setattr(modules.globals, 'nsfw_filter', nsfw_value.get()))
+#    nsfw_value = ctk.BooleanVar(value=modules.globals.nsfw)
+#    nsfw_switch = ctk.CTkSwitch(root, text='NSFW', variable=nsfw_value, cursor='hand2', command=lambda: setattr(modules.globals, 'nsfw', nsfw_value.get()))
 #    nsfw_switch.place(relx=0.6, rely=0.7)
 
     start_button = ctk.CTkButton(root, text='Start', cursor='hand2', command=lambda: select_output_path(start))
@@ -113,6 +120,9 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
 
     live_button = ctk.CTkButton(root, text='Live', cursor='hand2', command=lambda: webcam_preview())
     live_button.place(relx=0.40, rely=0.86, relwidth=0.2, relheight=0.05)
+
+    camera_dropdown = ctk.CTkOptionMenu(root, variable=selected_camera, values=camera_devices, command=lambda _: update_selected_camera())
+    camera_dropdown.place(relx=0.61, rely=0.86, relwidth=0.3, relheight=0.05)
 
     status_label = ctk.CTkLabel(root, text=None, justify='center')
     status_label.place(relx=0.1, rely=0.9, relwidth=0.8)
@@ -133,7 +143,7 @@ def create_preview(parent: ctk.CTkToplevel) -> ctk.CTkToplevel:
     preview.title('Preview')
     preview.configure()
     preview.protocol('WM_DELETE_WINDOW', lambda: toggle_preview())
-    preview.resizable(width=True, height=True)
+    preview.resizable(width=False, height=False)
 
     preview_label = ctk.CTkLabel(preview, text=None)
     preview_label.pack(fill='both', expand=True)
@@ -165,30 +175,6 @@ def select_source_path() -> None:
     else:
         modules.globals.source_path = None
         source_label.configure(image=None)
-
-
-def swap_faces_paths() -> None:
-    global RECENT_DIRECTORY_SOURCE, RECENT_DIRECTORY_TARGET
-
-    source_path = modules.globals.source_path
-    target_path = modules.globals.target_path
-
-    if not is_image(source_path) or not is_image(target_path):
-        return
-
-    modules.globals.source_path = target_path
-    modules.globals.target_path = source_path
-
-    RECENT_DIRECTORY_SOURCE = os.path.dirname(modules.globals.source_path)
-    RECENT_DIRECTORY_TARGET = os.path.dirname(modules.globals.target_path)
-
-    PREVIEW.withdraw()
-
-    source_image = render_image_preview(modules.globals.source_path, (200, 200))
-    source_label.configure(image=source_image)
-
-    target_image = render_image_preview(modules.globals.target_path, (200, 200))
-    target_label.configure(image=target_image)
 
 
 def select_target_path() -> None:
@@ -226,38 +212,6 @@ def select_output_path(start: Callable[[], None]) -> None:
         start()
 
 
-def check_and_ignore_nsfw(target, destroy: Callable = None) -> bool:
-    ''' Check if the target is NSFW.
-    TODO: Consider to make blur the target.
-    '''
-    from numpy import ndarray
-    from modules.predicter import predict_image, predict_video, predict_frame
-    if type(target) is str: # image/video file path
-        check_nsfw = predict_image if has_image_extension(target) else predict_video
-    elif type(target) is ndarray: # frame object
-        check_nsfw = predict_frame
-    if check_nsfw and check_nsfw(target):
-        if destroy: destroy(to_quit=False) # Do not need to destroy the window frame if the target is NSFW
-        update_status('Processing ignored!')
-        return True
-    else: return False
-
-
-def fit_image_to_size(image, width: int, height: int):
-    if width is None and height is None:
-      return image
-    h, w, _ = image.shape
-    ratio_h = 0.0
-    ratio_w = 0.0
-    if width > height:
-        ratio_h = height / h
-    else:
-        ratio_w = width  / w
-    ratio = max(ratio_w, ratio_h)
-    new_size = (int(ratio * w), int(ratio * h))
-    return cv2.resize(image, dsize=new_size)
-
-
 def render_image_preview(image_path: str, size: Tuple[int, int]) -> ctk.CTkImage:
     image = Image.open(image_path)
     if size:
@@ -285,6 +239,7 @@ def toggle_preview() -> None:
     elif modules.globals.source_path and modules.globals.target_path:
         init_preview()
         update_preview()
+        PREVIEW.deiconify()
 
 
 def init_preview() -> None:
@@ -299,10 +254,11 @@ def init_preview() -> None:
 
 def update_preview(frame_number: int = 0) -> None:
     if modules.globals.source_path and modules.globals.target_path:
-        update_status('Processing...')
         temp_frame = get_video_frame(modules.globals.target_path, frame_number)
-        if modules.globals.nsfw_filter and check_and_ignore_nsfw(temp_frame):
-            return
+        if modules.globals.nsfw == False:
+            from modules.predicter import predict_frame
+            if predict_frame(temp_frame):
+                quit()
         for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
             temp_frame = frame_processor.process_frame(
                 get_one_face(cv2.imread(modules.globals.source_path)),
@@ -312,52 +268,89 @@ def update_preview(frame_number: int = 0) -> None:
         image = ImageOps.contain(image, (PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT), Image.LANCZOS)
         image = ctk.CTkImage(image, size=image.size)
         preview_label.configure(image=image)
-        update_status('Processing succeed!')
-        PREVIEW.deiconify()
+
+def get_camera_names():
+    camera_names = []
+    try:
+        # Run the DirectShow command to list video input devices
+        process = subprocess.Popen(
+            "ffmpeg -list_devices true -f dshow -i dummy",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=False,
+            shell=True
+        )
+        output, _ = process.communicate()
+        output = output.decode('utf-8', errors='ignore')
+        pattern = r'"(.*?)" \(video\)'
+        for match in re.finditer(pattern, output):
+            camera_names.append(match.group(1))
+    except Exception as e:
+        print(f"Error: Unable to retrieve camera names. {str(e)}")
+    return camera_names
+
+def create_camera_dropdown(root: ctk.CTk):
+    global camera_dropdown, selected_camera
+    camera_dropdown = ctk.CTkOptionMenu(root, variable=selected_camera, values=camera_devices, command=lambda _: update_selected_camera())
+    camera_dropdown.place(relx=0.61, rely=0.86, relwidth=0.3, relheight=0.05)
+
+def update_selected_camera():
+    print(f"Selected camera: {selected_camera.get()}")
 
 def webcam_preview():
     if modules.globals.source_path is None:
         # No image selected
         return
 
-    global preview_label, PREVIEW
+    global preview_label, PREVIEW, camera_devices, selected_camera
 
-    camera = cv2.VideoCapture(0)                                    # Use index for the webcam (adjust the index accordingly if necessary)    
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, PREVIEW_DEFAULT_WIDTH)     # Set the width of the resolution
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, PREVIEW_DEFAULT_HEIGHT)   # Set the height of the resolution
-    camera.set(cv2.CAP_PROP_FPS, 60)                                # Set the frame rate of the webcam
+    # Ensure camera list is populated and index is valid
+    if not camera_devices:
+        print("No cameras detected.")
+        return
 
-    preview_label.configure(width=PREVIEW_DEFAULT_WIDTH, height=PREVIEW_DEFAULT_HEIGHT)  # Reset the preview image before startup
+    try:
+        inputSource = camera_devices.index(selected_camera.get())
+    except ValueError:
+        print("Selected camera not found in the list. Using default (0).")
+        inputSource = 0
 
-    PREVIEW.deiconify()  # Open preview window
+    print(f"Selected input source: {inputSource}")
+
+    cap = cv2.VideoCapture(inputSource)
+    
+    if not cap.isOpened():
+        print(f"Error: Unable to open camera with index {inputSource}.")
+        return
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
+    cap.set(cv2.CAP_PROP_FPS, 60)
+    PREVIEW_MAX_WIDTH = 960
+    PREVIEW_MAX_HEIGHT = 540
+
+    preview_label.configure(image=None)
+    PREVIEW.deiconify()
 
     frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
+    source_image = None
 
-    source_image = None  # Initialize variable for the selected face image
-
-    while camera:
-        ret, frame = camera.read()
+    while True:
+        ret, frame = cap.read()
         if not ret:
+            print("Failed to grab frame.")
             break
 
-        # Select and save face image only once
         if source_image is None and modules.globals.source_path:
             source_image = get_one_face(cv2.imread(modules.globals.source_path))
 
-        temp_frame = frame.copy()  #Create a copy of the frame
-
-        if modules.globals.live_mirror:
-            temp_frame = cv2.flip(temp_frame, 1) # horizontal flipping
-
-        if modules.globals.live_resizable:
-            temp_frame = fit_image_to_size(temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height())
-
+        temp_frame = frame.copy()
         for frame_processor in frame_processors:
             temp_frame = frame_processor.process_frame(source_image, temp_frame)
 
-        image = cv2.cvtColor(temp_frame, cv2.COLOR_BGR2RGB)  # Convert the image to RGB format to display it with Tkinter
+        image = cv2.cvtColor(temp_frame, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(image)
-        image = ImageOps.contain(image, (temp_frame.shape[1], temp_frame.shape[0]), Image.LANCZOS)
+        image = ImageOps.contain(image, (PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT), Image.LANCZOS)
         image = ctk.CTkImage(image, size=image.size)
         preview_label.configure(image=image)
         ROOT.update()
@@ -365,5 +358,6 @@ def webcam_preview():
         if PREVIEW.state() == 'withdrawn':
             break
 
-    camera.release()
-    PREVIEW.withdraw()  # Close preview window when loop is finished
+    cap.release()
+    PREVIEW.withdraw()
+
